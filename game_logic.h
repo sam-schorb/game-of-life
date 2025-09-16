@@ -2,6 +2,9 @@
 
 #include <unordered_set>
 #include <cstdint>
+#include <string>
+
+#include "gpu_calculator.h"
 
 // Simple 2D vector for coordinates (independent of olcPixelGameEngine)
 struct Vec2i {
@@ -94,8 +97,57 @@ struct GameState {
 // Core Game of Life calculation logic
 class GameLogic {
 public:
+    static void setUseGPU(bool enable) {
+        sUseGPU = enable;
+        gol::gpu::SetEnabled(enable);
+        if (!enable) {
+            sAnyGpuUsed = false;
+        }
+    }
+
+    static bool isGPUEnabled() {
+        return sUseGPU && gol::gpu::IsAvailable();
+    }
+
+    static bool lastStepUsedGPU() {
+        return sLastGpuUsed;
+    }
+
+    static bool wasGPUUsed() {
+        return sAnyGpuUsed;
+    }
+
+    static const std::string& lastGPUError() {
+        return sLastGpuError;
+    }
+
+    static void clearGPUError() {
+        sLastGpuError.clear();
+    }
+
     // Calculate next generation using Conway's rules
     static void calculateNextGeneration(const GameState& current, GameState& next) {
+        if (!sUseGPU) {
+            sLastGpuUsed = false;
+            sLastGpuError.clear();
+        }
+
+        if (sUseGPU) {
+            bool usedGPU = false;
+            std::string error;
+            if (gol::gpu::CalculateNextGeneration(current.active, current.potential,
+                                                  next.active, next.potential,
+                                                  usedGPU, &error) && usedGPU) {
+                sLastGpuUsed = true;
+                sAnyGpuUsed = true;
+                sLastGpuError.clear();
+                return;
+            }
+
+            sLastGpuUsed = false;
+            sLastGpuError = error;
+        }
+
         next.active.clear();
         next.potential.clear();
         next.potential.reserve(current.active.size());
@@ -155,6 +207,11 @@ public:
     }
 
 private:
+    inline static bool sUseGPU = false;
+    inline static bool sLastGpuUsed = false;
+    inline static bool sAnyGpuUsed = false;
+    inline static std::string sLastGpuError;
+
     // Count living neighbors for a cell
     static int countLivingNeighbors(const GameState& state, const Vec2i& cell) {
         int count = 0;

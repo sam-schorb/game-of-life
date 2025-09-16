@@ -13,7 +13,7 @@ if [ $? -eq 0 ]; then
     echo ""
 
     # Run the tests
-    ./test_game_of_life
+    ./test_game_of_life "$@"
 
     # Capture exit code
     exit_code=$?

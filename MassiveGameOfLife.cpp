@@ -7,6 +7,12 @@
 
 #include <unordered_set>
 #include <cassert>
+#include <chrono>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "gpu_calculator.h"
 
 // Fix for missing assert in olcPixelGameEngine
 #ifndef assert
@@ -36,6 +42,11 @@ protected:
 	bool bSimulationRunning = false;
 	int nBrushSize = 1;
 	olc::vi2d vLastMouseCell = {-999999, -999999};
+	bool bUseGPU = false;
+	bool bLastGPUUsed = false;
+	std::string sLastGPUError;
+	double fLastStepMilliseconds = 0.0;
+	gol::gpu::GpuTimingStats lastGpuTimings{};
 
 	void AddCell(const olc::vi2d& cell)
 	{
@@ -74,6 +85,82 @@ protected:
 		std::unordered_set<olc::vi2d, HASH_OLC_VI2D>& nextActive,
 		std::unordered_set<olc::vi2d, HASH_OLC_VI2D>& nextPotential)
 	{
+		if (!bUseGPU)
+		{
+			sLastGPUError.clear();
+		}
+
+		if (bUseGPU)
+		{
+			std::vector<gol::gpu::CellState> states;
+			std::vector<gol::gpu::RawCoordinate> neighborCoords;
+			bool usedGPU = false;
+			std::string gpuError;
+			gol::gpu::ResetTimingStats();
+			if (gol::gpu::ComputeCellStates(currentActive, potentialCells, states, neighborCoords, usedGPU, &gpuError) && usedGPU)
+			{
+				thread_local std::vector<olc::vi2d> activeBuffer;
+				thread_local std::vector<olc::vi2d> neighborBuffer;
+				activeBuffer.clear();
+				neighborBuffer.clear();
+				activeBuffer.reserve(states.size());
+				neighborBuffer.reserve(neighborCoords.size());
+				size_t changedCount = 0;
+				for (const auto& state : states)
+				{
+					const bool willBeAlive = state.willBeAlive != 0;
+					if (willBeAlive)
+					{
+						activeBuffer.emplace_back(state.x, state.y);
+					}
+					if ((state.wasAlive != 0) != willBeAlive)
+					{
+						++changedCount;
+					}
+				}
+				for (const auto& coord : neighborCoords)
+				{
+					neighborBuffer.emplace_back(coord.x, coord.y);
+				}
+				if (neighborCoords.size() < changedCount * 9)
+				{
+					neighborBuffer.clear();
+					neighborBuffer.reserve(changedCount * 9);
+					for (const auto& state : states)
+					{
+						const bool willBeAlive = state.willBeAlive != 0;
+						const bool wasAlive = state.wasAlive != 0;
+						if (wasAlive != willBeAlive)
+						{
+							for (int y = -1; y <= 1; ++y)
+								for (int x = -1; x <= 1; ++x)
+									neighborBuffer.emplace_back(state.x + x, state.y + y);
+						}
+					}
+				}
+
+				nextActive.clear();
+				nextActive.reserve(activeBuffer.size() * 2);
+				nextActive.insert(activeBuffer.begin(), activeBuffer.end());
+
+				nextPotential.clear();
+				nextPotential.reserve(currentActive.size() * 2 + neighborCoords.size());
+				nextPotential.insert(currentActive.begin(), currentActive.end());
+				nextPotential.insert(neighborBuffer.begin(), neighborBuffer.end());
+
+				bLastGPUUsed = true;
+				sLastGPUError.clear();
+				return;
+			}
+
+			bLastGPUUsed = false;
+			sLastGPUError = gpuError;
+		}
+		else
+		{
+			bLastGPUUsed = false;
+		}
+
 		auto getCellState = [&currentActive](const olc::vi2d& cell) -> int {
 			return currentActive.contains(cell) ? 1 : 0;
 		};
@@ -171,6 +258,21 @@ protected:
 		// Toggle simulation with spacebar
 		if (GetKey(olc::Key::SPACE).bPressed) bSimulationRunning = !bSimulationRunning;
 
+		if (GetKey(olc::Key::G).bPressed)
+		{
+			bUseGPU = !bUseGPU;
+			gol::gpu::SetEnabled(bUseGPU);
+			if (!bUseGPU)
+			{
+				sLastGPUError.clear();
+				bLastGPUUsed = false;
+			}
+			else if (!gol::gpu::IsAvailable())
+			{
+				sLastGPUError = "Metal GPU unavailable";
+			}
+		}
+
 		if (bSimulationRunning)
 		{
 
@@ -184,7 +286,15 @@ protected:
 			// We know all active cells this epoch have potential to stimulate next epoch
 			setPotentialNext = setActive;
 
+			auto stepStart = std::chrono::steady_clock::now();
 			CalculateNextGeneration(setActive, setPotential, setActiveNext, setPotentialNext);
+			auto stepEnd = std::chrono::steady_clock::now();
+			fLastStepMilliseconds = std::chrono::duration<double, std::milli>(stepEnd - stepStart).count();
+			lastGpuTimings = gol::gpu::GetTimingStats();
+			if (!bLastGPUUsed)
+			{
+				lastGpuTimings = {};
+			}
 		}
 
 
@@ -270,7 +380,23 @@ protected:
 
 		// Brush info and controls
 		DrawStringDecal({ 2,92 }, "Brush Size: " + std::to_string(nBrushSize) + " (1-9,0 keys to change)");
-		DrawStringDecal({ 2,102 }, "Controls: Arrows=Pan | Q/E=Zoom | Drag=Paint | R=Random | C=Clear");
+		std::string gpuStatus = bUseGPU ? (bLastGPUUsed ? "ON (GPU)" : "ON (CPU fallback)") : "OFF";
+		if (!sLastGPUError.empty())
+			gpuStatus += " - " + sLastGPUError;
+		DrawStringDecal({ 2,102 }, "GPU: " + gpuStatus + " (G to toggle)");
+		std::ostringstream timingStream;
+		timingStream.setf(std::ios::fixed, std::ios::floatfield);
+		timingStream.precision(2);
+		timingStream << "Step: " << fLastStepMilliseconds << " ms";
+		if (bLastGPUUsed)
+		{
+			timingStream << " [prep " << lastGpuTimings.prepareMilliseconds
+				<< " | upload " << lastGpuTimings.uploadMilliseconds
+				<< " | dispatch " << lastGpuTimings.dispatchMilliseconds
+				<< " | download " << lastGpuTimings.downloadMilliseconds << "]";
+		}
+		DrawStringDecal({ 2,112 }, timingStream.str());
+		DrawStringDecal({ 2,122 }, "Controls: Arrows=Pan | Q/E=Zoom | Drag=Paint | R=Random | C=Clear");
 
 		return !GetKey(olc::Key::ESCAPE).bPressed;
 	}

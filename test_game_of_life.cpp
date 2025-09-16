@@ -1,5 +1,6 @@
 #include "test_framework.h"
 #include "game_logic.h"
+#include "performance_helpers.h"
 
 // Global test runner
 TestRunner runner;
@@ -263,7 +264,59 @@ void test_large_patterns() {
     runner.ASSERT_TRUE(state.getPopulation() > 0, "Large pattern: Some cells survive after 10 generations");
 }
 
-int main() {
+int main(int argc, char** argv) {
+    bool requestGPU = false;
+    bool runBenchmark = false;
+    BenchmarkScenario scenario;
+    scenario.name = "Default";
+    scenario.generations = 15;
+    scenario.width = 256;
+    scenario.height = 256;
+    scenario.densityDivisor = 3;
+    bool customBenchmark = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--gpu") {
+            requestGPU = true;
+        } else if (arg.rfind("--benchmark", 0) == 0) {
+            runBenchmark = true;
+            auto pos = arg.find('=');
+            if (pos != std::string::npos) {
+                customBenchmark = true;
+                std::string value = arg.substr(pos + 1);
+                // Expected format: WxH:generations:density
+                // Example: --benchmark=512x512:20:4
+                size_t xPos = value.find('x');
+                size_t colon1 = value.find(':');
+                size_t colon2 = value.find(':', colon1 == std::string::npos ? std::string::npos : colon1 + 1);
+                if (xPos != std::string::npos) {
+                    scenario.width = std::stoi(value.substr(0, xPos));
+                    if (colon1 != std::string::npos) {
+                        scenario.height = std::stoi(value.substr(xPos + 1, colon1 - xPos - 1));
+                        if (colon2 != std::string::npos) {
+                            scenario.generations = std::stoi(value.substr(colon1 + 1, colon2 - colon1 - 1));
+                            scenario.densityDivisor = std::max(1, std::stoi(value.substr(colon2 + 1)));
+                        } else {
+                            scenario.generations = std::stoi(value.substr(colon1 + 1));
+                        }
+                    } else {
+                        scenario.height = std::stoi(value.substr(xPos + 1));
+                    }
+                }
+                scenario.name = value;
+            }
+        }
+    }
+
+    if (requestGPU) {
+        GameLogic::setUseGPU(true);
+        GameLogic::clearGPUError();
+        std::cout << "GPU acceleration requested" << std::endl;
+        if (!GameLogic::isGPUEnabled()) {
+            std::cout << "GPU unavailable - calculations will fall back to CPU" << std::endl;
+        }
+    }
+
     std::cout << "Massive Game of Life - Test Suite" << std::endl;
     std::cout << std::string(50, '=') << std::endl;
 
@@ -277,6 +330,36 @@ int main() {
     runner.RUN_TEST(test_large_patterns, "Large Patterns");
 
     runner.report_results();
+
+    if (requestGPU) {
+        if (GameLogic::wasGPUUsed()) {
+            std::cout << "GPU path executed successfully." << std::endl;
+        } else {
+            const std::string& gpuError = GameLogic::lastGPUError();
+            if (!gpuError.empty()) {
+                std::cout << "GPU fallback reason: " << gpuError << std::endl;
+            } else {
+                std::cout << "GPU path not used - CPU implementation executed." << std::endl;
+            }
+        }
+    }
+
+    if (runBenchmark) {
+        std::cout << "\nRunning benchmark scenario..." << std::endl;
+        std::vector<BenchmarkScenario> scenarios;
+        scenarios.push_back(scenario);
+
+        for (const auto& scen : scenarios) {
+            BenchmarkResult bench = RunBenchmark(scen);
+            std::cout << FormatBenchmarkResult(bench) << std::endl;
+
+            runner.ASSERT_EQ(bench.finalPopulationCPU, bench.finalPopulationGPU, "Benchmark final populations match");
+            if (bench.gpuUsed) {
+                runner.ASSERT_TRUE(bench.timings.totalMilliseconds <= bench.cpuMilliseconds,
+                                   "GPU compute should be at least as fast as CPU in benchmark");
+            }
+        }
+    }
 
     return runner.all_passed() ? 0 : 1;
 }
