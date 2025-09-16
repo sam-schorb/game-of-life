@@ -118,11 +118,72 @@ This function currently processes each potential cell sequentially, performing 8
 - Add CPU/GPU selection mechanism
 - Add data conversion utilities (sparse ↔ dense)
 
+## Available Test Suite
+
+A comprehensive test suite has been implemented to validate GPU implementation:
+
+### Test Infrastructure
+- **Core Logic Extraction**: `game_logic.h` contains platform-independent Game of Life logic
+- **Test Framework**: `test_framework.h` provides game-specific assertions and pattern testing utilities
+- **Test Suite**: `test_game_of_life.cpp` contains 33 comprehensive tests
+- **Build Scripts**: `build_tests.sh` and `run_tests.sh` for easy execution
+
+### Test Coverage (33 tests, all must pass)
+1. **Conway's Four Rules** (7 tests)
+   - Underpopulation: cells with < 2 neighbors die
+   - Survival: cells with 2-3 neighbors survive
+   - Overpopulation: cells with > 3 neighbors die
+   - Birth: dead cells with exactly 3 neighbors become alive
+
+2. **Neighbor Counting** (3 tests)
+   - All 8 directions correctly detected
+   - Diagonal neighbor recognition
+   - Large coordinate handling (edge cases)
+
+3. **Known Pattern Validation** (8 tests)
+   - **Still Lifes**: Block (2×2), Beehive - must remain stable
+   - **Oscillators**: Blinker (period 2), Toad (period 2) - must cycle correctly
+   - **Spaceships**: Glider movement and population preservation
+
+4. **User Interaction Simulation** (4 tests)
+   - Brush painting with various sizes
+   - Random cluster generation (with reproducible seeds)
+   - Population counting accuracy
+
+5. **Edge Cases & Stress Tests** (11 tests)
+   - Empty world behavior
+   - Extreme coordinates (INT32_MAX/2)
+   - Negative coordinates
+   - Large patterns (1000+ cells, 10+ generations)
+
+### GPU Validation Process
+
+**Critical Requirement**: Both CPU and GPU implementations must pass identical test suite.
+
+```bash
+# Validate CPU implementation
+./run_tests.sh
+# Expected: 🎉 ALL TESTS PASSED! (33/33)
+
+# Validate GPU implementation (after implementation)
+./run_tests.sh --gpu
+# Must produce: 🎉 ALL TESTS PASSED! (33/33)
+```
+
+### Test-Driven Development Approach
+1. **Before GPU Implementation**: Ensure all 33 tests pass on CPU version
+2. **During GPU Development**: Run tests frequently to catch regressions
+3. **GPU Completion**: Both CPU and GPU must produce identical results on all tests
+4. **Future Changes**: Any modification must maintain test suite compatibility
+
+The test suite provides **mathematical proof** that GPU implementation is behaviorally identical to the CPU version, eliminating guesswork and ensuring correctness.
+
 ## Success Criteria
 1. **Functional**: GPU implementation produces identical results to CPU version
 2. **Performance**: Significant speedup for 100,000+ cell simulations
 3. **Reliability**: Graceful fallback to CPU if GPU fails
 4. **Maintainable**: Clean separation between CPU and GPU code paths
 5. **User-transparent**: Existing gameplay and user experience unchanged
+6. **Test Validation**: Both CPU and GPU implementations pass all 33 tests identically
 
 The implementation should result in a drop-in replacement for the calculation function that can be toggled between CPU and GPU modes while maintaining all existing functionality and behavior.
